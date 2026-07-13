@@ -8,19 +8,40 @@ import (
 	"testing"
 )
 
-func TestDefaultConfigurationContainsReleaseDomains(t *testing.T) {
-	configuration := Default()
-	for _, required := range []string{"ozon.ru", "yandex.ru", "avito.ru", "gosuslugi.ru"} {
-		found := false
-		for _, domain := range configuration.Domains {
-			if domain == required {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("default configuration does not contain %s", required)
-		}
+func TestDefaultConfigurationHasExactDomainSet(t *testing.T) {
+	want := []string{
+		"api.ozon.ru",
+		"avito.ru",
+		"avito.st",
+		"cdn.ozone.ru",
+		"cdn1.ozone.ru",
+		"cdn2.ozone.ru",
+		"disk.yandex.ru",
+		"esia.gosuslugi.ru",
+		"gosuslugi.ru",
+		"lk.gosuslugi.ru",
+		"m.avito.ru",
+		"mail.yandex.ru",
+		"market.yandex.ru",
+		"music.yandex.ru",
+		"ozon.ru",
+		"passport.yandex.ru",
+		"pos.gosuslugi.ru",
+		"static.avito.ru",
+		"www.avito.ru",
+		"www.gosuslugi.ru",
+		"www.ozon.ru",
+		"www.yandex.ru",
+		"ya.ru",
+		"yandex.com",
+		"yandex.net",
+		"yandex.ru",
+		"yastatic.net",
+	}
+	got := append([]string(nil), Default().Domains...)
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected default domain set:\n got: %v\nwant: %v", got, want)
 	}
 }
 
