@@ -10,13 +10,17 @@ import (
 	"time"
 
 	"github.com/dimatitov/vpn-bypass/internal/app"
+	"github.com/dimatitov/vpn-bypass/internal/config"
+	"github.com/dimatitov/vpn-bypass/internal/logstore"
 	"github.com/dimatitov/vpn-bypass/internal/service"
 )
 
 var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
+	version            = "dev"
+	commit             = "unknown"
+	date               = "unknown"
+	ensureInstallation = config.Ensure
+	purgeInstallation  = config.Purge
 )
 
 type serviceFactory func() (service.Manager, error)
@@ -59,7 +63,7 @@ func run(args []string, out, errOut io.Writer, newService serviceFactory) error 
 		}
 		return application.Remove(args[1])
 
-	case "list", "sync", "clear", "status", "doctor", "watch":
+	case "list", "sync", "clear", "doctor":
 		application, err := newApp()
 		if err != nil {
 			return err
@@ -80,28 +84,77 @@ func run(args []string, out, errOut io.Writer, newService serviceFactory) error 
 				return fmt.Errorf("usage: vpn-bypass clear")
 			}
 			return application.Clear(ctx)
-		case "status":
-			if len(args) != 1 {
-				return fmt.Errorf("usage: vpn-bypass status")
-			}
-			return application.Status()
 		case "doctor":
 			if len(args) != 1 {
 				return fmt.Errorf("usage: vpn-bypass doctor")
 			}
 			return application.Doctor(ctx)
-		case "watch":
-			fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-			fs.SetOutput(errOut)
-			interval := fs.Duration("interval", time.Minute, "route refresh interval")
-			if err := fs.Parse(args[1:]); err != nil {
-				return err
-			}
-			if fs.NArg() != 0 {
-				return fmt.Errorf("usage: vpn-bypass watch [--interval 60s]")
-			}
-			return application.Watch(ctx, *interval)
 		}
+
+	case "watch":
+		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		interval := fs.Duration("interval", time.Minute, "route refresh interval")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: vpn-bypass watch [--interval 60s]")
+		}
+		paths, err := config.Paths()
+		if err != nil {
+			return err
+		}
+		logFile, err := logstore.Open(paths.Logs)
+		if err != nil {
+			return err
+		}
+		defer logFile.Close()
+		application, err := app.NewWithWriters(io.MultiWriter(out, logFile), io.MultiWriter(errOut, logFile))
+		if err != nil {
+			return err
+		}
+		return application.Watch(ctx, *interval)
+
+	case "install":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: vpn-bypass install")
+		}
+		return runInstall(ctx, out, newService)
+
+	case "uninstall":
+		fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		purge := fs.Bool("purge", false, "remove configuration, state, and logs")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: vpn-bypass uninstall [--purge]")
+		}
+		return runUninstall(ctx, out, newService, newApp, *purge)
+
+	case "status":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: vpn-bypass status")
+		}
+		return runStatus(ctx, out, newService, newApp)
+
+	case "logs":
+		fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		follow := fs.Bool("follow", false, "follow appended log output")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: vpn-bypass logs [--follow]")
+		}
+		paths, err := config.Paths()
+		if err != nil {
+			return err
+		}
+		return logstore.Show(ctx, logstore.Path(paths.Logs), out, *follow)
 
 	case "service":
 		return runService(ctx, args[1:], out, errOut, newService, newApp)
@@ -140,27 +193,15 @@ func runService(ctx context.Context, args []string, out, _ io.Writer, newService
 
 	switch args[0] {
 	case "install":
-		if err := manager.Install(ctx); err != nil {
-			return err
-		}
-		fmt.Fprintln(out, "Service installed and started.")
-		return nil
+		return runInstallWithManager(ctx, out, manager)
 	case "uninstall":
-		removal, err := uninstallService(ctx, manager, func() error {
+		return runUninstallWithManager(ctx, out, manager, func() error {
 			application, appErr := newApp()
 			if appErr != nil {
 				return appErr
 			}
 			return application.Clear(ctx)
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(out, "Service uninstalled.")
-		if removal.RebootRequired {
-			fmt.Fprintln(out, "Installed executable removal is scheduled for the next reboot.")
-		}
-		return nil
+		}, false)
 	case "status":
 		state, err := manager.Status(ctx)
 		if err != nil {
@@ -172,17 +213,108 @@ func runService(ctx context.Context, args []string, out, _ io.Writer, newService
 	return nil
 }
 
-func uninstallService(ctx context.Context, manager service.Manager, clearRoutes func() error) (service.Removal, error) {
+func runInstall(ctx context.Context, out io.Writer, newService serviceFactory) error {
+	manager, err := newService()
+	if err != nil {
+		return err
+	}
+	return runInstallWithManager(ctx, out, manager)
+}
+
+func runInstallWithManager(ctx context.Context, out io.Writer, manager service.Manager) error {
+	paths, err := ensureInstallation()
+	if err != nil {
+		return fmt.Errorf("prepare installation: %w", err)
+	}
+	if err := manager.Install(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "vpn-bypass installed and started.")
+	fmt.Fprintln(out, "Configuration:", paths.Config)
+	fmt.Fprintln(out, "Next steps: run 'vpn-bypass status' and 'vpn-bypass doctor'.")
+	return nil
+}
+
+func runUninstall(ctx context.Context, out io.Writer, newService serviceFactory, newApp func() (*app.App, error), purge bool) error {
+	manager, err := newService()
+	if err != nil {
+		return err
+	}
+	return runUninstallWithManager(ctx, out, manager, func() error {
+		application, appErr := newApp()
+		if appErr != nil {
+			return appErr
+		}
+		return application.Clear(ctx)
+	}, purge)
+}
+
+func runUninstallWithManager(ctx context.Context, out io.Writer, manager service.Manager, clearRoutes func() error, purge bool) error {
+	removal, err := uninstallService(ctx, manager, clearRoutes, purge, purgeInstallation)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "vpn-bypass uninstalled.")
+	if purge {
+		fmt.Fprintln(out, "Configuration, state, and logs removed.")
+	} else {
+		fmt.Fprintln(out, "Configuration and logs preserved.")
+	}
+	if removal.RebootRequired {
+		fmt.Fprintln(out, "Installed executable removal is scheduled for the next reboot.")
+	}
+	return nil
+}
+
+func runStatus(ctx context.Context, out io.Writer, newService serviceFactory, newApp func() (*app.App, error)) error {
+	manager, err := newService()
+	if err != nil {
+		return err
+	}
+	serviceState, err := manager.Status(ctx)
+	if err != nil {
+		return err
+	}
+	application, err := newApp()
+	if err != nil {
+		return err
+	}
+	status, err := application.Status(ctx)
+	if err != nil {
+		return err
+	}
+	lastSync := "never"
+	if !status.LastSync.IsZero() {
+		lastSync = status.LastSync.UTC().Format(time.RFC3339)
+	}
+	writeStatus(out, serviceState, status, lastSync)
+	return nil
+}
+
+func writeStatus(out io.Writer, serviceState service.State, status app.StatusInfo, lastSync string) {
+	fmt.Fprintf(out, "version: %s\nservice: %s\ndirect_gateway: %s\ndirect_interface: %s\nmanaged_routes: %d\nlast_successful_sync: %s\nconfig_path: %s\nstate_path: %s\n",
+		version, serviceState, status.Gateway, status.Interface, status.Routes, lastSync, status.ConfigPath, status.StatePath)
+}
+
+func uninstallService(ctx context.Context, manager service.Manager, clearRoutes func() error, purge bool, purgeData func() error) (service.Removal, error) {
 	var errs []error
 	if err := manager.Stop(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("stop service: %w", err))
 	}
-	if err := clearRoutes(); err != nil {
-		errs = append(errs, fmt.Errorf("clear owned routes: %w", err))
+	clearErr := clearRoutes()
+	if clearErr != nil {
+		errs = append(errs, fmt.Errorf("clear owned routes: %w", clearErr))
 	}
 	removal, err := manager.Remove(ctx)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("remove service: %w", err))
+	}
+	if purge {
+		if len(errs) != 0 {
+			errs = append(errs, fmt.Errorf("purge skipped because uninstall cleanup did not complete"))
+		} else if err := purgeData(); err != nil {
+			errs = append(errs, fmt.Errorf("purge application data: %w", err))
+		}
 	}
 	return removal, errors.Join(errs...)
 }
@@ -196,11 +328,14 @@ Commands:
   list                    show configuration
   sync                    update routes
   clear                   remove routes owned by vpn-bypass
-  status                  show saved routing state
+  status                  show application and routing status
   doctor                  check the direct gateway and routing
   watch --interval 60s    continuously refresh routes
+  install                 install and start vpn-bypass
+  uninstall [--purge]     uninstall and optionally remove all data
+  logs [--follow]         show or follow service logs
   service install         install and start the background service
-  service uninstall       stop and uninstall the background service
+  service uninstall       backward-compatible uninstall alias
   service status          show the background service status
   version                 show build information`)
 }
