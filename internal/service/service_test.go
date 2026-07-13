@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -27,7 +28,7 @@ func TestCopyFileAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0755 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("unexpected mode: %o", info.Mode().Perm())
 	}
 }
