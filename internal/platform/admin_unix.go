@@ -9,7 +9,7 @@ import (
 
 func RequireAdministrator() error {
 	if os.Geteuid() != 0 {
-		return fmt.Errorf("нужны права администратора: запусти через sudo")
+		return fmt.Errorf("administrator privileges are required; run with sudo")
 	}
 	return nil
 }

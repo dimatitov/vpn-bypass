@@ -43,7 +43,7 @@ func parseDarwinGateway(ctx context.Context, target string) (Gateway, error) {
 	}
 
 	if result.Address == "" || result.Interface == "" {
-		return Gateway{}, fmt.Errorf("не удалось определить шлюз для %s", target)
+		return Gateway{}, fmt.Errorf("could not determine gateway for %s", target)
 	}
 	return result, nil
 }

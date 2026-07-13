@@ -23,14 +23,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA} -X main.date=${BUILD_DATE}"
 
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o vpn-bypass ./cmd/vpn-bypass
+          GOOS=darwin GOARCH=arm64 go build -ldflags="$LDFLAGS" -o vpn-bypass ./cmd/vpn-bypass
           tar -czf dist/vpn-bypass_Darwin_arm64.tar.gz vpn-bypass
 
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o vpn-bypass ./cmd/vpn-bypass
+          GOOS=darwin GOARCH=amd64 go build -ldflags="$LDFLAGS" -o vpn-bypass ./cmd/vpn-bypass
           tar -czf dist/vpn-bypass_Darwin_x86_64.tar.gz vpn-bypass
 
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o vpn-bypass.exe ./cmd/vpn-bypass
+          GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o vpn-bypass.exe ./cmd/vpn-bypass
           zip -j dist/vpn-bypass_Windows_x86_64.zip vpn-bypass.exe
 
           shasum -a 256 dist/* > dist/checksums.txt

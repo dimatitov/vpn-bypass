@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -16,12 +18,19 @@ import (
 )
 
 type App struct {
-	configPath string
-	statePath  string
-	router     platform.Router
+	configPath           string
+	statePath            string
+	router               platform.Router
+	out                  io.Writer
+	errOut               io.Writer
+	requireAdministrator func() error
 }
 
 func New() (*App, error) {
+	return NewWithWriters(os.Stdout, os.Stderr)
+}
+
+func NewWithWriters(out, errOut io.Writer) (*App, error) {
 	paths, err := config.Paths()
 	if err != nil {
 		return nil, err
@@ -33,9 +42,12 @@ func New() (*App, error) {
 	}
 
 	return &App{
-		configPath: paths.Config,
-		statePath:  paths.State,
-		router:     router,
+		configPath:           paths.Config,
+		statePath:            paths.State,
+		router:               router,
+		out:                  out,
+		errOut:               errOut,
+		requireAdministrator: platform.RequireAdministrator,
 	}, nil
 }
 
@@ -47,7 +59,7 @@ func (a *App) Add(value string) error {
 
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "" {
-		return fmt.Errorf("пустое значение")
+		return fmt.Errorf("value cannot be empty")
 	}
 
 	if _, err := netip.ParsePrefix(value); err == nil {
@@ -62,7 +74,7 @@ func (a *App) Add(value string) error {
 		return err
 	}
 
-	fmt.Println("Добавлено:", value)
+	fmt.Fprintln(a.out, "Added:", value)
 	return nil
 }
 
@@ -81,7 +93,7 @@ func (a *App) Remove(value string) error {
 		return err
 	}
 
-	fmt.Println("Удалено:", value)
+	fmt.Fprintln(a.out, "Removed:", value)
 	return nil
 }
 
@@ -91,27 +103,27 @@ func (a *App) List() error {
 		return err
 	}
 
-	fmt.Println("Домены:")
+	fmt.Fprintln(a.out, "Domains:")
 	if len(cfg.Domains) == 0 {
-		fmt.Println("  —")
+		fmt.Fprintln(a.out, "  —")
 	}
 	for _, value := range cfg.Domains {
-		fmt.Println(" ", value)
+		fmt.Fprintln(a.out, " ", value)
 	}
 
-	fmt.Println("CIDR/IP:")
+	fmt.Fprintln(a.out, "CIDR/IP:")
 	if len(cfg.CIDRs) == 0 {
-		fmt.Println("  —")
+		fmt.Fprintln(a.out, "  —")
 	}
 	for _, value := range cfg.CIDRs {
-		fmt.Println(" ", value)
+		fmt.Fprintln(a.out, " ", value)
 	}
 
 	return nil
 }
 
 func (a *App) Sync(ctx context.Context) error {
-	if err := platform.RequireAdministrator(); err != nil {
+	if err := a.requireAdministrator(); err != nil {
 		return err
 	}
 
@@ -127,7 +139,7 @@ func (a *App) Sync(ctx context.Context) error {
 
 	desired, warnings := resolveDesired(cfg)
 	for _, warning := range warnings {
-		fmt.Fprintln(os.Stderr, "Предупреждение:", warning)
+		fmt.Fprintln(a.errOut, "Warning:", warning)
 	}
 
 	oldState, err := state.Load(a.statePath)
@@ -148,7 +160,7 @@ func (a *App) Sync(ctx context.Context) error {
 	for prefix := range oldSet {
 		if !newSet[prefix] {
 			_ = a.router.DeleteRoute(ctx, prefix, gateway.Interface)
-			fmt.Println("DEL", prefix)
+			fmt.Fprintln(a.out, "DEL", prefix)
 		}
 	}
 
@@ -157,10 +169,10 @@ func (a *App) Sync(ctx context.Context) error {
 			continue
 		}
 		if err := a.router.AddRoute(ctx, prefix, gateway); err != nil {
-			fmt.Fprintln(os.Stderr, "Ошибка добавления", prefix, ":", err)
+			fmt.Fprintln(a.errOut, "Failed to add", prefix, ":", err)
 			continue
 		}
-		fmt.Println("ADD", prefix, "via", gateway.Address)
+		fmt.Fprintln(a.out, "ADD", prefix, "via", gateway.Address)
 	}
 
 	next := state.State{
@@ -174,12 +186,12 @@ func (a *App) Sync(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Printf("SYNC routes=%d gateway=%s interface=%s\n", len(desired), gateway.Address, gateway.Interface)
+	fmt.Fprintf(a.out, "SYNC routes=%d gateway=%s interface=%s\n", len(desired), gateway.Address, gateway.Interface)
 	return nil
 }
 
 func (a *App) Clear(ctx context.Context) error {
-	if err := platform.RequireAdministrator(); err != nil {
+	if err := a.requireAdministrator(); err != nil {
 		return err
 	}
 
@@ -188,17 +200,30 @@ func (a *App) Clear(ctx context.Context) error {
 		return err
 	}
 
+	remaining := make([]string, 0)
+	var errs []error
 	for _, prefix := range st.Routes {
-		_ = a.router.DeleteRoute(ctx, prefix, st.Interface)
-		fmt.Println("DEL", prefix)
+		if err := a.router.DeleteRoute(ctx, prefix, st.Interface); err != nil {
+			remaining = append(remaining, prefix)
+			errs = append(errs, fmt.Errorf("delete route %s: %w", prefix, err))
+			continue
+		}
+		fmt.Fprintln(a.out, "DEL", prefix)
 	}
 
-	if err := state.Save(a.statePath, state.State{}); err != nil {
-		return err
+	next := st
+	next.Routes = remaining
+	if len(remaining) == 0 {
+		next = state.State{}
+	}
+	if err := state.Save(a.statePath, next); err != nil {
+		errs = append(errs, fmt.Errorf("save route state: %w", err))
 	}
 
-	fmt.Println("Маршруты удалены")
-	return nil
+	if len(errs) == 0 {
+		fmt.Fprintln(a.out, "Routes cleared")
+	}
+	return errors.Join(errs...)
 }
 
 func (a *App) Status() error {
@@ -207,11 +232,11 @@ func (a *App) Status() error {
 		return err
 	}
 
-	fmt.Println("Обычный шлюз:", emptyDash(st.Gateway))
-	fmt.Println("Интерфейс:", emptyDash(st.Interface))
-	fmt.Println("Маршрутов:", len(st.Routes))
+	fmt.Fprintln(a.out, "Direct gateway:", emptyDash(st.Gateway))
+	fmt.Fprintln(a.out, "Interface:", emptyDash(st.Interface))
+	fmt.Fprintln(a.out, "Routes:", len(st.Routes))
 	if !st.UpdatedAt.IsZero() {
-		fmt.Println("Последнее обновление:", st.UpdatedAt.Format(time.RFC3339))
+		fmt.Fprintln(a.out, "Last updated:", st.UpdatedAt.Format(time.RFC3339))
 	}
 	return nil
 }
@@ -222,8 +247,8 @@ func (a *App) Doctor(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Println("DIRECT gateway:", gateway.Address)
-	fmt.Println("DIRECT interface:", gateway.Interface)
+	fmt.Fprintln(a.out, "DIRECT gateway:", gateway.Address)
+	fmt.Fprintln(a.out, "DIRECT interface:", gateway.Interface)
 
 	cfg, err := config.Load(a.configPath)
 	if err != nil {
@@ -231,14 +256,14 @@ func (a *App) Doctor(ctx context.Context) error {
 	}
 
 	if len(cfg.Domains) == 0 {
-		fmt.Println("Домены: не настроены")
+		fmt.Fprintln(a.out, "Domains: not configured")
 		return nil
 	}
 
 	host := cfg.Domains[0]
 	ips, err := net.LookupIP(host)
 	if err != nil || len(ips) == 0 {
-		fmt.Println(host, "DNS: ошибка")
+		fmt.Fprintln(a.out, host, "DNS: error")
 		return nil
 	}
 
@@ -251,21 +276,21 @@ func (a *App) Doctor(ctx context.Context) error {
 	}
 
 	if ipv4 == "" {
-		fmt.Println(host, "IPv4: не найден")
+		fmt.Fprintln(a.out, host, "IPv4: not found")
 		return nil
 	}
 
 	route, err := a.router.RouteFor(ctx, ipv4)
 	if err != nil {
-		fmt.Println(host, ipv4, "route: ошибка:", err)
+		fmt.Fprintln(a.out, host, ipv4, "route error:", err)
 		return nil
 	}
 
-	fmt.Printf("%s %s -> gateway=%s interface=%s\n", host, ipv4, route.Address, route.Interface)
+	fmt.Fprintf(a.out, "%s %s -> gateway=%s interface=%s\n", host, ipv4, route.Address, route.Interface)
 	if route.Address == gateway.Address {
-		fmt.Println("DIRECT: OK")
+		fmt.Fprintln(a.out, "DIRECT: OK")
 	} else {
-		fmt.Println("DIRECT: маршрут ещё не установлен; запусти sync")
+		fmt.Fprintln(a.out, "DIRECT: route is not installed yet; run sync")
 	}
 
 	return nil
@@ -276,10 +301,10 @@ func (a *App) Watch(ctx context.Context, interval time.Duration) error {
 		interval = 15 * time.Second
 	}
 
-	fmt.Println("WATCH interval=", interval)
+	fmt.Fprintln(a.out, "WATCH interval=", interval)
 	for {
 		if err := a.Sync(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "SYNC error:", err)
+			fmt.Fprintln(a.errOut, "SYNC error:", err)
 		}
 
 		select {
@@ -316,7 +341,7 @@ func resolveDesired(cfg config.Config) ([]string, []error) {
 
 		prefix, err := netip.ParsePrefix(value)
 		if err != nil {
-			warnings = append(warnings, fmt.Errorf("неверный CIDR %s", value))
+			warnings = append(warnings, fmt.Errorf("invalid CIDR %s", value))
 			continue
 		}
 		if prefix.Addr().Is4() {

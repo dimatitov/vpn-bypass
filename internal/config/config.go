@@ -29,11 +29,11 @@ func Paths() (PathSet, error) {
 	case "windows":
 		base := os.Getenv("ProgramData")
 		if base == "" {
-			return PathSet{}, fmt.Errorf("ProgramData не задан")
+			return PathSet{}, fmt.Errorf("ProgramData is not set")
 		}
 		dir = filepath.Join(base, "vpn-bypass")
 	default:
-		return PathSet{}, fmt.Errorf("неподдерживаемая ОС: %s", runtime.GOOS)
+		return PathSet{}, fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
 
 	return PathSet{
@@ -49,19 +49,32 @@ func Default() Config {
 			"ozon.ru",
 			"www.ozon.ru",
 			"api.ozon.ru",
+			"ir.ozon.ru",
+			"cdn1.ozone.ru",
+			"cdn2.ozone.ru",
 			"cdn.ozone.ru",
 			"yandex.ru",
 			"www.yandex.ru",
 			"ya.ru",
 			"yastatic.net",
 			"yandex.net",
+			"yandex.com",
+			"passport.yandex.ru",
+			"mail.yandex.ru",
+			"market.yandex.ru",
+			"disk.yandex.ru",
+			"music.yandex.ru",
 			"avito.ru",
 			"www.avito.ru",
+			"m.avito.ru",
 			"img.avito.st",
+			"static.avito.ru",
 			"avito.st",
 			"gosuslugi.ru",
 			"www.gosuslugi.ru",
 			"esia.gosuslugi.ru",
+			"pos.gosuslugi.ru",
+			"lk.gosuslugi.ru",
 		},
 		CIDRs: []string{},
 	}
@@ -82,7 +95,7 @@ func Load(path string) (Config, error) {
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("чтение config.json: %w", err)
+		return Config{}, fmt.Errorf("read config.json: %w", err)
 	}
 	return cfg, nil
 }
