@@ -18,6 +18,12 @@ jobs:
         with:
           go-version: "1.24.x"
 
+      - name: Check formatting
+        shell: bash
+        run: |
+          files="$(gofmt -l $(git ls-files '*.go'))"
+          test -z "$files" || { echo "Unformatted files:"; echo "$files"; exit 1; }
+
       - run: go test ./...
 
       - run: go vet ./...

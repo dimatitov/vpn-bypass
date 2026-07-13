@@ -35,7 +35,18 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -ldflags="$LDFLAGS" -o vpn-bypass.exe ./cmd/vpn-bypass
           zip -j dist/vpn-bypass_Windows_x86_64.zip vpn-bypass.exe
 
-          shasum -a 256 dist/* > dist/checksums.txt
+          (
+            cd dist
+            shasum -a 256 \
+              vpn-bypass_Darwin_arm64.tar.gz \
+              vpn-bypass_Darwin_x86_64.tar.gz \
+              vpn-bypass_Windows_x86_64.zip > checksums.txt
+          )
+
+          test -s dist/vpn-bypass_Darwin_arm64.tar.gz
+          test -s dist/vpn-bypass_Darwin_x86_64.tar.gz
+          test -s dist/vpn-bypass_Windows_x86_64.zip
+          test -s dist/checksums.txt
 
       - uses: softprops/action-gh-release@v2
         with:
