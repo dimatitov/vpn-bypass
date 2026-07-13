@@ -4,8 +4,25 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 )
+
+func TestDefaultConfigurationContainsReleaseDomains(t *testing.T) {
+	configuration := Default()
+	for _, required := range []string{"ozon.ru", "yandex.ru", "avito.ru", "gosuslugi.ru"} {
+		found := false
+		for _, domain := range configuration.Domains {
+			if domain == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("default configuration does not contain %s", required)
+		}
+	}
+}
 
 func TestLoadExistingConfigurationFormat(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -19,5 +36,79 @@ func TestLoadExistingConfigurationFormat(t *testing.T) {
 	}
 	if !reflect.DeepEqual(configuration.Domains, []string{"example.com"}) || !reflect.DeepEqual(configuration.CIDRs, []string{"198.51.100.0/24"}) {
 		t.Fatalf("unexpected configuration: %+v", configuration)
+	}
+}
+
+func TestEnsurePreservesExistingConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	paths := PathSet{
+		Directory: directory,
+		Config:    filepath.Join(directory, "config.json"),
+		State:     filepath.Join(directory, "state.json"),
+		Logs:      filepath.Join(directory, "logs"),
+	}
+	original := []byte("{\n  \"domains\": [\"custom.example\"],\n  \"cidrs\": []\n}\n")
+	if err := os.WriteFile(paths.Config, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensure(paths); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("existing configuration changed:\n%s", after)
+	}
+	if info, err := os.Stat(paths.Logs); err != nil || !info.IsDir() {
+		t.Fatalf("log directory was not created: %v", err)
+	}
+}
+
+func TestEnsureCreatesDefaultConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	paths := PathSet{
+		Directory: directory,
+		Config:    filepath.Join(directory, "config.json"),
+		State:     filepath.Join(directory, "state.json"),
+		Logs:      filepath.Join(directory, "logs"),
+	}
+	if _, err := ensure(paths); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := Load(paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := Default()
+	sort.Strings(expected.Domains)
+	sort.Strings(expected.CIDRs)
+	if !reflect.DeepEqual(configuration, expected) {
+		t.Fatalf("unexpected fresh configuration: %+v", configuration)
+	}
+}
+
+func TestPurgeRemovesDataAndExternalLogs(t *testing.T) {
+	root := t.TempDir()
+	paths := PathSet{
+		Directory: filepath.Join(root, "data"),
+		Config:    filepath.Join(root, "data", "config.json"),
+		State:     filepath.Join(root, "data", "state.json"),
+		Logs:      filepath.Join(root, "logs"),
+	}
+	if err := os.MkdirAll(paths.Directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Logs, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := purge(paths); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{paths.Directory, paths.Logs} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("path was not purged: %s", path)
+		}
 	}
 }

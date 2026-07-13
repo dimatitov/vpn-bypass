@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/dimatitov/vpn-bypass/internal/config"
 	"github.com/dimatitov/vpn-bypass/internal/platform"
@@ -19,14 +22,16 @@ type fakeRouter struct {
 	deleted   []string
 	addErr    map[string]error
 	deleteErr map[string]error
+	routes    map[string]platform.Gateway
+	routeErr  map[string]error
 }
 
 func (f *fakeRouter) DirectGateway(context.Context) (platform.Gateway, error) {
 	return f.gateway, nil
 }
 
-func (f *fakeRouter) RouteFor(context.Context, string) (platform.Gateway, error) {
-	return platform.Gateway{}, nil
+func (f *fakeRouter) RouteFor(_ context.Context, target string) (platform.Gateway, error) {
+	return f.routes[target], f.routeErr[target]
 }
 
 func (f *fakeRouter) AddRoute(_ context.Context, prefix string, _ platform.Gateway) error {
@@ -69,6 +74,40 @@ func TestSyncDoesNotRecordFailedAdditions(t *testing.T) {
 	if len(saved.Routes) != 0 {
 		t.Fatalf("failed addition was recorded: %+v", saved)
 	}
+	if !saved.UpdatedAt.IsZero() {
+		t.Fatalf("failed sync changed last successful sync: %+v", saved)
+	}
+}
+
+func TestSuccessfulSyncUpdatesLastSuccessfulSync(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.json")
+	statePath := filepath.Join(directory, "state.json")
+	if err := config.Save(configPath, config.Config{CIDRs: []string{"198.51.100.1/32"}}); err != nil {
+		t.Fatal(err)
+	}
+	router := &fakeRouter{
+		gateway: platform.Gateway{Address: "192.0.2.1", Interface: "en0"},
+		addErr:  map[string]error{},
+	}
+	application := &App{
+		configPath:           configPath,
+		statePath:            statePath,
+		router:               router,
+		out:                  &bytes.Buffer{},
+		errOut:               &bytes.Buffer{},
+		requireAdministrator: func() error { return nil },
+	}
+	if err := application.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := state.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.UpdatedAt.IsZero() {
+		t.Fatalf("successful sync did not update timestamp: %+v", saved)
+	}
 }
 
 func TestSyncRetainsFailedDeletions(t *testing.T) {
@@ -82,6 +121,7 @@ func TestSyncRetainsFailedDeletions(t *testing.T) {
 		Gateway:   "192.0.2.1",
 		Interface: "en0",
 		Routes:    []string{"198.51.100.1/32"},
+		UpdatedAt: time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC),
 	}
 	if err := state.Save(statePath, recorded); err != nil {
 		t.Fatal(err)
@@ -114,6 +154,89 @@ func TestSyncRetainsFailedDeletions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(saved.Routes, recorded.Routes) {
 		t.Fatalf("failed deletion was forgotten: %+v", saved)
+	}
+	if !saved.UpdatedAt.Equal(recorded.UpdatedAt) {
+		t.Fatalf("failed sync changed last successful sync: %+v", saved)
+	}
+}
+
+func TestStatusReturnsRuntimeAndPathInformation(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	lastSync := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	if err := state.Save(statePath, state.State{Routes: []string{"198.51.100.1/32"}, UpdatedAt: lastSync}); err != nil {
+		t.Fatal(err)
+	}
+	application := &App{
+		configPath: "/config.json",
+		statePath:  statePath,
+		router: &fakeRouter{gateway: platform.Gateway{
+			Address: "192.0.2.1", Interface: "en0",
+		}},
+	}
+	status, err := application.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Gateway != "192.0.2.1" || status.Interface != "en0" || status.Routes != 1 || !status.LastSync.Equal(lastSync) || status.ConfigPath != "/config.json" || status.StatePath != statePath {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+}
+
+func TestDoctorPassesCompleteRoutingChecks(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, config.Config{Domains: []string{"example.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	direct := platform.Gateway{Address: "192.0.2.1", Interface: "en0"}
+	vpn := platform.Gateway{Address: "10.0.0.1", Interface: "utun0"}
+	var out bytes.Buffer
+	application := &App{
+		configPath: configPath,
+		router: &fakeRouter{
+			gateway: direct,
+			routes: map[string]platform.Gateway{
+				"198.51.100.10": direct,
+				"1.1.1.1":       vpn,
+			},
+			routeErr: map[string]error{},
+		},
+		out:                  &out,
+		requireAdministrator: func() error { return nil },
+		lookupIP: func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("198.51.100.10")}, nil
+		},
+	}
+	if err := application.Doctor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []string{"administrator", "configuration", "direct-gateway", "dns", "bypass-route", "vpn-route"} {
+		if !strings.Contains(out.String(), "check: "+check+" ok") {
+			t.Fatalf("missing successful %s check:\n%s", check, out.String())
+		}
+	}
+}
+
+func TestDoctorFailsWhenVPNRouteIsNotDetected(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, config.Config{Domains: []string{"example.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	direct := platform.Gateway{Address: "192.0.2.1", Interface: "en0"}
+	application := &App{
+		configPath: configPath,
+		router: &fakeRouter{
+			gateway:  direct,
+			routes:   map[string]platform.Gateway{"198.51.100.10": direct, "1.1.1.1": direct},
+			routeErr: map[string]error{},
+		},
+		out:                  &bytes.Buffer{},
+		requireAdministrator: func() error { return nil },
+		lookupIP: func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("198.51.100.10")}, nil
+		},
+	}
+	if err := application.Doctor(context.Background()); err == nil {
+		t.Fatal("expected doctor to fail without a VPN route")
 	}
 }
 

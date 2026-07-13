@@ -24,6 +24,16 @@ type App struct {
 	out                  io.Writer
 	errOut               io.Writer
 	requireAdministrator func() error
+	lookupIP             func(context.Context, string) ([]net.IP, error)
+}
+
+type StatusInfo struct {
+	Gateway    string
+	Interface  string
+	Routes     int
+	LastSync   time.Time
+	ConfigPath string
+	StatePath  string
 }
 
 func New() (*App, error) {
@@ -48,6 +58,9 @@ func NewWithWriters(out, errOut io.Writer) (*App, error) {
 		out:                  out,
 		errOut:               errOut,
 		requireAdministrator: platform.RequireAdministrator,
+		lookupIP: func(ctx context.Context, host string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(ctx, "ip4", host)
+		},
 	}, nil
 }
 
@@ -137,9 +150,11 @@ func (a *App) Sync(ctx context.Context) error {
 		return err
 	}
 
-	desired, warnings := resolveDesired(cfg)
+	desired, warnings := a.resolveDesired(ctx, cfg)
+	var errs []error
 	for _, warning := range warnings {
 		fmt.Fprintln(a.errOut, "Warning:", warning)
+		errs = append(errs, warning)
 	}
 
 	oldState, err := state.Load(a.statePath)
@@ -147,7 +162,7 @@ func (a *App) Sync(ctx context.Context) error {
 		return err
 	}
 
-	var errs []error
+	lastSuccessfulSync := oldState.UpdatedAt
 	if oldState.Gateway != "" && (oldState.Gateway != gateway.Address || oldState.Interface != gateway.Interface) {
 		remaining := make([]string, 0)
 		for _, prefix := range oldState.Routes {
@@ -160,7 +175,6 @@ func (a *App) Sync(ctx context.Context) error {
 		}
 		if len(remaining) != 0 {
 			oldState.Routes = remaining
-			oldState.UpdatedAt = time.Now()
 			if err := state.Save(a.statePath, oldState); err != nil {
 				errs = append(errs, fmt.Errorf("save route state: %w", err))
 			}
@@ -206,7 +220,10 @@ func (a *App) Sync(ctx context.Context) error {
 		Gateway:   gateway.Address,
 		Interface: gateway.Interface,
 		Routes:    managedRoutes,
-		UpdatedAt: time.Now(),
+		UpdatedAt: lastSuccessfulSync,
+	}
+	if len(errs) == 0 {
+		next.UpdatedAt = time.Now()
 	}
 
 	if err := state.Save(a.statePath, next); err != nil {
@@ -253,74 +270,88 @@ func (a *App) Clear(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (a *App) Status() error {
+func (a *App) Status(ctx context.Context) (StatusInfo, error) {
 	st, err := state.Load(a.statePath)
 	if err != nil {
-		return err
+		return StatusInfo{}, err
 	}
-
-	fmt.Fprintln(a.out, "Direct gateway:", emptyDash(st.Gateway))
-	fmt.Fprintln(a.out, "Interface:", emptyDash(st.Interface))
-	fmt.Fprintln(a.out, "Routes:", len(st.Routes))
-	if !st.UpdatedAt.IsZero() {
-		fmt.Fprintln(a.out, "Last updated:", st.UpdatedAt.Format(time.RFC3339))
+	gateway, err := a.router.DirectGateway(ctx)
+	if err != nil {
+		return StatusInfo{}, fmt.Errorf("detect direct gateway: %w", err)
 	}
-	return nil
+	return StatusInfo{
+		Gateway:    gateway.Address,
+		Interface:  gateway.Interface,
+		Routes:     len(st.Routes),
+		LastSync:   st.UpdatedAt,
+		ConfigPath: a.configPath,
+		StatePath:  a.statePath,
+	}, nil
 }
 
 func (a *App) Doctor(ctx context.Context) error {
-	gateway, err := a.router.DirectGateway(ctx)
-	if err != nil {
-		return err
+	var errs []error
+	record := func(name string, err error, detail string) {
+		if err != nil {
+			fmt.Fprintf(a.out, "check: %s failed: %v\n", name, err)
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			return
+		}
+		fmt.Fprintf(a.out, "check: %s ok%s\n", name, detail)
 	}
 
-	fmt.Fprintln(a.out, "DIRECT gateway:", gateway.Address)
-	fmt.Fprintln(a.out, "DIRECT interface:", gateway.Interface)
-
-	cfg, err := config.Load(a.configPath)
-	if err != nil {
-		return err
+	adminErr := a.requireAdministrator()
+	record("administrator", adminErr, "")
+	cfg, configErr := config.Load(a.configPath)
+	record("configuration", configErr, " path="+a.configPath)
+	gateway, gatewayErr := a.router.DirectGateway(ctx)
+	detail := ""
+	if gatewayErr == nil {
+		detail = " gateway=" + gateway.Address + " interface=" + gateway.Interface
+	}
+	record("direct-gateway", gatewayErr, detail)
+	if configErr != nil || gatewayErr != nil {
+		return errors.Join(errs...)
 	}
 
-	if len(cfg.Domains) == 0 {
-		fmt.Fprintln(a.out, "Domains: not configured")
-		return nil
-	}
-
-	host := cfg.Domains[0]
-	ips, err := net.LookupIP(host)
-	if err != nil || len(ips) == 0 {
-		fmt.Fprintln(a.out, host, "DNS: error")
-		return nil
-	}
-
-	var ipv4 string
-	for _, ip := range ips {
-		if v := ip.To4(); v != nil {
-			ipv4 = v.String()
+	var host, ipv4 string
+	var dnsErr error
+	for _, candidate := range cfg.Domains {
+		ips, err := a.lookupIP(ctx, candidate)
+		if err != nil {
+			dnsErr = err
+			continue
+		}
+		for _, ip := range ips {
+			if value := ip.To4(); value != nil {
+				host, ipv4 = candidate, value.String()
+				break
+			}
+		}
+		if ipv4 != "" {
 			break
 		}
 	}
-
 	if ipv4 == "" {
-		fmt.Fprintln(a.out, host, "IPv4: not found")
-		return nil
-	}
-
-	route, err := a.router.RouteFor(ctx, ipv4)
-	if err != nil {
-		fmt.Fprintln(a.out, host, ipv4, "route error:", err)
-		return nil
-	}
-
-	fmt.Fprintf(a.out, "%s %s -> gateway=%s interface=%s\n", host, ipv4, route.Address, route.Interface)
-	if route.Address == gateway.Address {
-		fmt.Fprintln(a.out, "DIRECT: OK")
+		if dnsErr == nil {
+			dnsErr = fmt.Errorf("no configured domain resolved to IPv4")
+		}
+		record("dns", dnsErr, "")
 	} else {
-		fmt.Fprintln(a.out, "DIRECT: route is not installed yet; run sync")
+		record("dns", nil, " domain="+host+" ip="+ipv4)
+		route, err := a.router.RouteFor(ctx, ipv4)
+		if err == nil && !sameGateway(route, gateway) {
+			err = fmt.Errorf("%s is not routed through the direct gateway", host)
+		}
+		record("bypass-route", err, " domain="+host)
 	}
 
-	return nil
+	publicRoute, publicErr := a.router.RouteFor(ctx, "1.1.1.1")
+	if publicErr == nil && sameGateway(publicRoute, gateway) {
+		publicErr = fmt.Errorf("unrelated public IP uses the direct gateway; VPN route not detected")
+	}
+	record("vpn-route", publicErr, " target=1.1.1.1")
+	return errors.Join(errs...)
 }
 
 func (a *App) Watch(ctx context.Context, interval time.Duration) error {
@@ -342,12 +373,12 @@ func (a *App) Watch(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-func resolveDesired(cfg config.Config) ([]string, []error) {
+func (a *App) resolveDesired(ctx context.Context, cfg config.Config) ([]string, []error) {
 	set := map[string]bool{}
 	var warnings []error
 
 	for _, domain := range cfg.Domains {
-		ips, err := net.LookupIP(domain)
+		ips, err := a.lookupIP(ctx, domain)
 		if err != nil {
 			warnings = append(warnings, fmt.Errorf("%s: %w", domain, err))
 			continue
@@ -384,6 +415,10 @@ func resolveDesired(cfg config.Config) ([]string, []error) {
 	return result, warnings
 }
 
+func sameGateway(first, second platform.Gateway) bool {
+	return first.Address == second.Address && first.Interface == second.Interface
+}
+
 func appendUnique(values []string, value string) []string {
 	for _, current := range values {
 		if current == value {
@@ -409,11 +444,4 @@ func sliceSet(values []string) map[string]bool {
 		result[value] = true
 	}
 	return result
-}
-
-func emptyDash(value string) string {
-	if value == "" {
-		return "—"
-	}
-	return value
 }

@@ -1,33 +1,73 @@
 # vpn-bypass
 
-`vpn-bypass` routes selected domains, IPv4 addresses, and IPv4 networks through the normal system gateway instead of a full-tunnel VPN. It supports macOS and Windows.
+`vpn-bypass` routes selected domains, IPv4 addresses, and IPv4 networks through the normal system gateway while other traffic continues through a full-tunnel VPN.
 
-This is IP routing, not true domain-based routing. Domains may resolve to changing CDN addresses, so the background watcher refreshes routes every 60 seconds.
+Supported platforms:
 
-## Installation
+- macOS on Apple silicon and Intel
+- Windows x86-64
 
-Download the archive for your operating system from the GitHub Releases page, extract it, and run the binary from a terminal. You can also build it locally with Go 1.24 or newer:
+This is IP-based routing, not true domain-based routing. Domains may use CDNs and change addresses, so the installed background service refreshes routes every 60 seconds. Linux is not supported.
 
-```text
+## Install from a release archive
+
+Release archives contain a standalone executable. Go and Python are not required.
+
+### macOS
+
+For Apple silicon:
+
+```bash
+curl -LO https://github.com/dimatitov/vpn-bypass/releases/download/v0.1.0/vpn-bypass_Darwin_arm64.tar.gz
+tar -xzf vpn-bypass_Darwin_arm64.tar.gz
+sudo ./vpn-bypass install
+```
+
+Intel Macs use `vpn-bypass_Darwin_x86_64.tar.gz` instead. Installation copies the executable to `/usr/local/bin/vpn-bypass`, creates the default configuration when one does not already exist, and starts the LaunchDaemon.
+
+### Windows
+
+Open PowerShell as Administrator:
+
+```powershell
+Invoke-WebRequest `
+  https://github.com/dimatitov/vpn-bypass/releases/download/v0.1.0/vpn-bypass_Windows_x86_64.zip `
+  -OutFile vpn-bypass.zip
+Expand-Archive .\vpn-bypass.zip -DestinationPath .\vpn-bypass-release
+.\vpn-bypass-release\vpn-bypass.exe install
+```
+
+Installation copies the executable to `C:\Program Files\vpn-bypass\vpn-bypass.exe`, creates the default configuration when needed, and starts a SYSTEM Task Scheduler task.
+
+The installer deliberately does not modify system `PATH`. Use the extracted executable or the installed path:
+
+```powershell
+& "C:\Program Files\vpn-bypass\vpn-bypass.exe" status
+```
+
+## Build from source
+
+Go 1.24 or newer is required only for source builds:
+
+```bash
+git clone https://github.com/dimatitov/vpn-bypass.git
+cd vpn-bypass
 go build -o vpn-bypass ./cmd/vpn-bypass
+sudo ./vpn-bypass install
 ```
 
-On Windows, use `vpn-bypass.exe` instead. Verify the build information with:
+On Windows, build `vpn-bypass.exe` and run `install` from an elevated PowerShell terminal.
 
-```text
-vpn-bypass version
-```
+## First-time setup
 
-The service installer accepts a local build, an executable extracted from a release archive, or a Homebrew-managed executable. Homebrew symlinks are resolved before the service copy is installed, so later Cellar cleanup does not break the running service.
+A fresh installation creates an editable JSON configuration with bypass domains for Ozon, Yandex, Avito, and Gosuslugi. Existing configuration is never overwritten during install or upgrade.
 
-## Configuration
-
-The machine-wide configuration file is stored at:
+Configuration paths:
 
 - macOS: `/Library/Application Support/vpn-bypass/config.json`
 - Windows: `C:\ProgramData\vpn-bypass\config.json`
 
-Its existing JSON format remains stable:
+Format:
 
 ```json
 {
@@ -36,112 +76,131 @@ Its existing JSON format remains stable:
 }
 ```
 
-Manage entries with the CLI:
+Use `add`, `remove`, and `list` to edit it. Because configuration is machine-wide, modifications may require an elevated terminal.
 
-```text
-vpn-bypass add example.com
-vpn-bypass add 198.51.100.0/24
-vpn-bypass remove example.com
-vpn-bypass list
-```
+## Service and reboot behavior
 
-The configuration is machine-wide, so modifying it may require an elevated terminal. Routes can also be refreshed or removed manually with `vpn-bypass sync` and `vpn-bypass clear`; these routing operations require administrator privileges.
-
-## Background service
-
-The service runs:
+Both `vpn-bypass install` and the backward-compatible `vpn-bypass service install` use the same installer. The service starts immediately and runs after every reboot:
 
 ```text
 vpn-bypass watch --interval 60s
 ```
 
-It starts immediately after installation and automatically starts again after every reboot.
+macOS uses LaunchDaemon `io.github.dimatitov.vpn-bypass`. Windows uses a Task Scheduler task with the same name, running as SYSTEM with highest privileges.
 
-### macOS
-
-Install or upgrade the LaunchDaemon:
-
-```text
-sudo vpn-bypass service install
-```
-
-The executable is copied to `/usr/local/bin/vpn-bypass`. The LaunchDaemon identifier is `io.github.dimatitov.vpn-bypass`, and logs are written to:
-
-```text
-/Library/Logs/vpn-bypass/stdout.log
-/Library/Logs/vpn-bypass/stderr.log
-```
-
-### Windows
-
-Open PowerShell as Administrator and run:
-
-```powershell
-.\vpn-bypass.exe service install
-```
-
-The executable is copied to `C:\Program Files\vpn-bypass\vpn-bypass.exe`. Task Scheduler runs `io.github.dimatitov.vpn-bypass` as `SYSTEM` at system startup and restarts it after an unexpected failure.
-
-### Status
-
-Status does not require administrator privileges:
+Check the service alone with:
 
 ```text
 vpn-bypass service status
 ```
 
-The output is stable and contains exactly one of:
+Its stable output is `status: not-installed`, `status: running`, or `status: stopped`.
+
+## Command reference
 
 ```text
-status: not-installed
-status: running
-status: stopped
+vpn-bypass add <domain|cidr>
+vpn-bypass remove <domain|cidr>
+vpn-bypass list
+vpn-bypass sync
+vpn-bypass clear
+vpn-bypass status
+vpn-bypass doctor
+vpn-bypass watch --interval 60s
+vpn-bypass logs
+vpn-bypass logs --follow
+vpn-bypass version
+vpn-bypass install
+vpn-bypass uninstall
+vpn-bypass uninstall --purge
+vpn-bypass service install
+vpn-bypass service uninstall
+vpn-bypass service status
 ```
 
-### Uninstall
+`sync`, `clear`, `install`, and `uninstall` require administrator privileges. `service uninstall` remains an alias for non-purge uninstall; purge is available only as `vpn-bypass uninstall --purge`.
 
-On macOS:
+## Status and diagnostics
+
+`vpn-bypass status` reports stable key/value fields:
 
 ```text
-sudo vpn-bypass service uninstall
+version: v0.1.0
+service: running
+direct_gateway: 192.0.2.1
+direct_interface: en0
+managed_routes: 12
+last_successful_sync: 2026-07-13T12:00:00Z
+config_path: /Library/Application Support/vpn-bypass/config.json
+state_path: /Library/Application Support/vpn-bypass/state.json
 ```
 
-On Windows, use an elevated PowerShell terminal:
+Run `vpn-bypass doctor` from an elevated terminal. It exits non-zero if an essential check fails and verifies:
 
-```powershell
-.\vpn-bypass.exe service uninstall
+- administrator privileges;
+- configuration readability;
+- DNS resolution;
+- direct gateway detection;
+- an active VPN route for an unrelated public IP;
+- direct routing for at least one configured bypass domain.
+
+## Logs
+
+Use `vpn-bypass logs` or `vpn-bypass logs --follow`.
+
+Stable directories:
+
+- macOS: `/Library/Logs/vpn-bypass/`
+- Windows: `C:\ProgramData\vpn-bypass\logs\`
+
+The watcher writes `vpn-bypass.log`. The macOS LaunchDaemon also captures process output in `stdout.log` and `stderr.log`.
+
+## Uninstall and purge
+
+Normal uninstall stops and unregisters the service, clears only routes recorded as owned by vpn-bypass, removes the installed executable, and preserves configuration and logs:
+
+```bash
+# macOS
+sudo vpn-bypass uninstall
+
+# Windows, in an Administrator PowerShell
+vpn-bypass uninstall
 ```
 
-Uninstall stops the service, attempts to remove only routes recorded in the vpn-bypass state file, unregisters the service, and removes its installed executable. Cleanup continues if an individual step fails, and all failures are reported together. If Windows is running the installed executable itself, its deletion is scheduled for the next reboot.
+Remove configuration, state, and logs as well:
 
-User configuration, logs, and any routes not recorded by vpn-bypass are never deleted. Failed route deletions remain in the state file so they can be retried with `vpn-bypass clear`.
+```bash
+# macOS
+sudo vpn-bypass uninstall --purge
+
+# Windows, in an Administrator PowerShell
+vpn-bypass uninstall --purge
+```
+
+Purge is skipped if owned routes cannot be cleared, preventing loss of the state needed to retry cleanup. On Windows, deleting the currently running installed executable may be scheduled for the next reboot.
+
+## Homebrew readiness
+
+Release archives and checksums are prepared for [dimatitov/homebrew-tap](https://github.com/dimatitov/homebrew-tap). The following commands are intentionally **unavailable until the formula is updated after the first release**:
+
+```bash
+brew tap dimatitov/tap
+brew install vpn-bypass
+```
+
+This repository does not modify the tap formula.
 
 ## Troubleshooting
 
-Run the routing diagnostic:
+- Run `vpn-bypass status` to verify service and routing state.
+- Run elevated `vpn-bypass doctor` for end-to-end diagnostics.
+- Inspect `vpn-bypass logs --follow` while reconnecting the VPN.
+- Validate `config.json` if configuration loading fails.
+- DNS failures or CDN changes may temporarily prevent some routes from being installed; the watcher retries failed additions.
+- Security software may block Task Scheduler, PowerShell networking cmdlets, or route changes.
 
-```text
-vpn-bypass doctor
-```
+The implementation only manages routes recorded in its state file. It does not inspect VPN credentials, modify VPN configuration, install drivers, open network listeners, or alter Windows `PATH`.
 
-If the service is installed but stopped, inspect its platform status:
+## Manual validation
 
-```text
-launchctl print system/io.github.dimatitov.vpn-bypass
-```
-
-On macOS, also inspect the files under `/Library/Logs/vpn-bypass`. On Windows, open Task Scheduler or run:
-
-```powershell
-Get-ScheduledTask -TaskName io.github.dimatitov.vpn-bypass
-```
-
-Common causes include:
-
-- the VPN changing the direct gateway after startup;
-- DNS resolution returning no IPv4 addresses;
-- a configuration file that is not valid JSON;
-- insufficient privileges for route changes or service installation;
-- security software preventing Task Scheduler or route-table changes.
-
-The saved routing state is located at `/Library/Application Support/vpn-bypass/state.json` on macOS and `C:\ProgramData\vpn-bypass\state.json` on Windows. Do not edit it while the watcher is running.
+See [the macOS and Windows smoke-test checklist](docs/manual-smoke-test.md).
