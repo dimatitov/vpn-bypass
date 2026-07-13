@@ -147,19 +147,39 @@ func (a *App) Sync(ctx context.Context) error {
 		return err
 	}
 
-	if oldState.Gateway != "" && oldState.Gateway != gateway.Address {
+	var errs []error
+	if oldState.Gateway != "" && (oldState.Gateway != gateway.Address || oldState.Interface != gateway.Interface) {
+		remaining := make([]string, 0)
 		for _, prefix := range oldState.Routes {
-			_ = a.router.DeleteRoute(ctx, prefix, oldState.Interface)
+			if err := a.router.DeleteRoute(ctx, prefix, oldState.Interface); err != nil {
+				remaining = append(remaining, prefix)
+				errs = append(errs, fmt.Errorf("delete route %s from previous gateway: %w", prefix, err))
+				continue
+			}
+			fmt.Fprintln(a.out, "DEL", prefix)
 		}
-		oldState.Routes = nil
+		if len(remaining) != 0 {
+			oldState.Routes = remaining
+			oldState.UpdatedAt = time.Now()
+			if err := state.Save(a.statePath, oldState); err != nil {
+				errs = append(errs, fmt.Errorf("save route state: %w", err))
+			}
+			return errors.Join(errs...)
+		}
+		oldState = state.State{}
 	}
 
 	oldSet := sliceSet(oldState.Routes)
 	newSet := sliceSet(desired)
+	managed := sliceSet(oldState.Routes)
 
 	for prefix := range oldSet {
 		if !newSet[prefix] {
-			_ = a.router.DeleteRoute(ctx, prefix, gateway.Interface)
+			if err := a.router.DeleteRoute(ctx, prefix, oldState.Interface); err != nil {
+				errs = append(errs, fmt.Errorf("delete route %s: %w", prefix, err))
+				continue
+			}
+			delete(managed, prefix)
 			fmt.Fprintln(a.out, "DEL", prefix)
 		}
 	}
@@ -170,24 +190,31 @@ func (a *App) Sync(ctx context.Context) error {
 		}
 		if err := a.router.AddRoute(ctx, prefix, gateway); err != nil {
 			fmt.Fprintln(a.errOut, "Failed to add", prefix, ":", err)
+			errs = append(errs, fmt.Errorf("add route %s: %w", prefix, err))
 			continue
 		}
+		managed[prefix] = true
 		fmt.Fprintln(a.out, "ADD", prefix, "via", gateway.Address)
 	}
+	managedRoutes := make([]string, 0, len(managed))
+	for prefix := range managed {
+		managedRoutes = append(managedRoutes, prefix)
+	}
+	sort.Strings(managedRoutes)
 
 	next := state.State{
 		Gateway:   gateway.Address,
 		Interface: gateway.Interface,
-		Routes:    desired,
+		Routes:    managedRoutes,
 		UpdatedAt: time.Now(),
 	}
 
 	if err := state.Save(a.statePath, next); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("save route state: %w", err))
 	}
 
-	fmt.Fprintf(a.out, "SYNC routes=%d gateway=%s interface=%s\n", len(desired), gateway.Address, gateway.Interface)
-	return nil
+	fmt.Fprintf(a.out, "SYNC routes=%d gateway=%s interface=%s\n", len(managedRoutes), gateway.Address, gateway.Interface)
+	return errors.Join(errs...)
 }
 
 func (a *App) Clear(ctx context.Context) error {

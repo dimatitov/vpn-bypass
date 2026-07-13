@@ -88,6 +88,17 @@ func TestDarwinStopIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestDarwinStopBootsOutStoppedJob(t *testing.T) {
+	launchd := &fakeLaunchd{state: StateStopped}
+	manager := &darwinManager{launchd: launchd, requireAdmin: func() error { return nil }}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(launchd.operations, []string{"status", "bootout"}) {
+		t.Fatalf("unexpected lifecycle: %v", launchd.operations)
+	}
+}
+
 func TestDarwinRemoveContinuesAfterErrors(t *testing.T) {
 	removeErr := errors.New("permission denied")
 	var paths []string

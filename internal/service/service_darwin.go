@@ -88,7 +88,7 @@ func (m *darwinManager) Stop(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if state != StateRunning {
+	if state == StateNotInstalled {
 		return nil
 	}
 	return m.launchd.Bootout(ctx)
@@ -144,7 +144,17 @@ func darwinPlist() string {
 type commandLaunchd struct{}
 
 func (commandLaunchd) Bootout(ctx context.Context) error {
-	return runLaunchctl(ctx, "bootout", "system/"+macLabel)
+	out, err := exec.CommandContext(ctx, "launchctl", "bootout", "system/"+macLabel).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.ToLower(string(out))
+	for _, expected := range []string{"no such process", "could not find service", "service cannot be found"} {
+		if strings.Contains(message, expected) {
+			return nil
+		}
+	}
+	return fmt.Errorf("launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
 }
 
 func (commandLaunchd) Bootstrap(ctx context.Context) error {
