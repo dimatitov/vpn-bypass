@@ -51,10 +51,10 @@ func runPowerShellGateway(ctx context.Context, script string) (Gateway, error) {
 
 	var result Gateway
 	if err := json.Unmarshal(out, &result); err != nil {
-		return Gateway{}, fmt.Errorf("разбор PowerShell: %w", err)
+		return Gateway{}, fmt.Errorf("parse PowerShell output: %w", err)
 	}
 	if result.Address == "" || result.Interface == "" {
-		return Gateway{}, fmt.Errorf("шлюз не найден")
+		return Gateway{}, fmt.Errorf("gateway not found")
 	}
 	return result, nil
 }
