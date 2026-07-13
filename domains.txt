@@ -1,0 +1,38 @@
+# Один хост на строку. Комментарии начинаются с #.
+
+# Ozon
+ozon.ru
+www.ozon.ru
+api.ozon.ru
+ir.ozon.ru
+cdn1.ozone.ru
+cdn2.ozone.ru
+cdn.ozone.ru
+
+# Яндекс
+yandex.ru
+www.yandex.ru
+ya.ru
+yastatic.net
+yandex.net
+yandex.com
+passport.yandex.ru
+mail.yandex.ru
+market.yandex.ru
+disk.yandex.ru
+music.yandex.ru
+
+# Авито
+avito.ru
+www.avito.ru
+m.avito.ru
+img.avito.st
+static.avito.ru
+avito.st
+
+# Госуслуги / ЕСИА
+gosuslugi.ru
+www.gosuslugi.ru
+esia.gosuslugi.ru
+pos.gosuslugi.ru
+lk.gosuslugi.ru
